@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Agent UI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="agent-avatar" id="agentAvatar">
+            <div class="ring ring-1"></div>
+            <div class="ring ring-2"></div>
+            <div class="icon">🎙️</div>
+        </div>
+        
+        <h1 id="statusText">Bereit für den Anruf</h1>
+        <p id="subStatusText">Klicke unten, um mit dem Agenten zu sprechen.</p>
+        
+        <div class="controls">
+            <button id="startCallBtn" class="btn btn-primary">Anruf starten</button>
+            <button id="endCallBtn" class="btn btn-danger" style="display: none;">Auflegen</button>
+        </div>
+    </div>
+
+    <!-- We use an audio worklet structure if needed, or simple script processor -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
