@@ -121,3 +121,39 @@ p {
     background-color: #dc2626;
     transform: translateY(-2px);
 }
+
+/* Transcriptions */
+.transcription-container {
+    margin-top: 1rem;
+    margin-bottom: 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    text-align: left;
+}
+
+.transcript-box {
+    padding: 0.75rem;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    max-height: 100px;
+    overflow-y: auto;
+    transition: all 0.3s ease;
+}
+
+.transcript-box:empty {
+    display: none;
+}
+
+.user-transcript {
+    background-color: rgba(59, 130, 246, 0.1);
+    border-left: 3px solid #3b82f6;
+    color: #93c5fd;
+}
+
+.model-transcript {
+    background-color: rgba(139, 92, 246, 0.1);
+    border-left: 3px solid #8b5cf6;
+    color: #c4b5fd;
+}

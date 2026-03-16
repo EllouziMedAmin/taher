@@ -9,6 +9,9 @@ const endCallBtn = document.getElementById("endCallBtn");
 const statusText = document.getElementById("statusText");
 const subStatusText = document.getElementById("subStatusText");
 const agentAvatar = document.getElementById("agentAvatar");
+const transcriptionContainer = document.getElementById("transcriptionContainer");
+const userTranscript = document.getElementById("userTranscript");
+const modelTranscript = document.getElementById("modelTranscript");
 
 /**
  * We need to resample the audio coming from the browser microphone (usually 44.1kHz or 48kHz)
@@ -47,6 +50,19 @@ function downsampleBuffer(buffer, sampleRate, outRate) {
 let audioQueue = [];
 let isPlaying = false;
 let nextStartTime = 0;
+let activeSources = [];
+
+function stopAllAudio() {
+    activeSources.forEach(source => {
+        try {
+            source.stop();
+        } catch (e) {}
+    });
+    activeSources = [];
+    nextStartTime = audioContext ? audioContext.currentTime : 0;
+    agentAvatar.classList.remove("speaking");
+    console.log("Audio playback stopped due to interruption.");
+}
 
 function playAudioChunk(arrayBuffer) {
     if (!audioContext) return;
@@ -72,10 +88,15 @@ function playAudioChunk(arrayBuffer) {
     source.start(nextStartTime);
     nextStartTime += audioBuffer.duration;
     
+    activeSources.push(source);
+    
     // Add visual feedback
     agentAvatar.classList.add("speaking");
     
     source.onended = () => {
+        // Remove from active sources
+        activeSources = activeSources.filter(s => s !== source);
+        
         // If nothing else is scheduled soon, stop animation
         if (nextStartTime <= audioContext.currentTime + 0.1) {
             agentAvatar.classList.remove("speaking");
@@ -95,10 +116,17 @@ async function startCall() {
         // 2. Initialize AudioContext for capturing
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         const inputSampleRate = audioContext.sampleRate;
+        
+        // Load AudioWorklet processor
+        await audioContext.audioWorklet.addModule('/static/recorder-processor.js');
+        
         const source = audioContext.createMediaStreamSource(mediaStream);
+        const workletNode = new AudioWorkletNode(audioContext, 'recorder-processor');
         
         // 3. Connect WebSocket to FastAPI backend
-        ws = new WebSocket(`ws://${window.location.host}/ws`);
+        // Use the current host to avoid hardcoding localhost
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
         ws.binaryType = "arraybuffer";
         
         ws.onopen = () => {
@@ -107,28 +135,50 @@ async function startCall() {
             subStatusText.innerText = "Der Agent hört dich. Sprich jetzt!";
             isCallActive = true;
             
+            transcriptionContainer.style.display = "flex";
+            userTranscript.innerText = "";
+            modelTranscript.innerText = "";
+            
             startCallBtn.style.display = "none";
             endCallBtn.style.display = "inline-block";
             
-            // Start capturing and sending audio
-            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination); // Required for Chrome to fire onaudioprocess
-            
-            scriptProcessor.onaudioprocess = (e) => {
+            source.connect(workletNode);
+            workletNode.connect(audioContext.destination); // Keep it connected to destination if needed for timing
+
+            workletNode.port.onmessage = (event) => {
                 if (!isCallActive || ws.readyState !== WebSocket.OPEN) return;
                 
-                const inputData = e.inputBuffer.getChannelData(0);
+                const inputData = event.data;
                 const pcm16Data = downsampleBuffer(inputData, inputSampleRate, 16000);
                 
                 // Send raw Int16 PCM array buffer to WebSocket
                 ws.send(pcm16Data.buffer);
             };
+            
+            // Store it globally so we can disconnect it
+            scriptProcessor = workletNode; 
         };
         
         ws.onmessage = async (event) => {
-            // Receive raw Int16 PCM audio chunk from Gemini via FastAPI
-            playAudioChunk(event.data);
+            if (typeof event.data === "string") {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === "interrupted") {
+                        stopAllAudio();
+                    }
+                    if (msg.type === "input_transcript") {
+                        userTranscript.innerText = "Du: " + msg.text;
+                    }
+                    if (msg.type === "output_transcript") {
+                        modelTranscript.innerText = "Agent: " + msg.text;
+                    }
+                } catch (e) {
+                    console.error("Error parsing JSON message:", e);
+                }
+            } else {
+                // Receive raw Int16 PCM audio chunk from Gemini via FastAPI
+                playAudioChunk(event.data);
+            }
         };
         
         ws.onclose = () => {
@@ -170,6 +220,10 @@ function endCall() {
     subStatusText.innerText = "Der Anruf wurde beendet.";
     startCallBtn.style.display = "inline-block";
     endCallBtn.style.display = "none";
+    
+    if (transcriptionContainer) {
+        transcriptionContainer.style.display = "none";
+    }
 }
 
 startCallBtn.addEventListener("click", startCall);

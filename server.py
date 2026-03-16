@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import base64
+import traceback
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,51 +25,95 @@ async def get():
 
 async def receive_from_gemini(websocket: WebSocket, session):
     """Receive audio from Gemini and send it to the browser."""
+    print("Task started: receive_from_gemini")
     try:
-        async for response in session.receive():
-            server_content = response.server_content
-            if server_content is not None:
-                model_turn = getattr(server_content, "model_turn", None)
-                if model_turn is not None:
-                    for part in getattr(model_turn, "parts", []):
-                        # WebSockets expect binary data for audio
-                        if getattr(part, "inline_data", None) and part.inline_data.data:
-                            # Send raw PCM bytes directly to the browser
-                            await websocket.send_bytes(part.inline_data.data)
+        while True:
+            # The iterator in session.receive() might exhaust after a turn
+            # so we wrap it in a while loop to listen for subsequent turns.
+            async for response in session.receive():
+                server_content = response.server_content
+                if server_content is not None:
+                    # Check for interruption signal
+                    if getattr(server_content, "interrupted", False):
+                        print("Gemini signal: Interrupted")
+                        # Signal the browser to stop audio playback
+                        await websocket.send_json({"type": "interrupted"})
+                        continue
 
-                # Send turnaround signals if needed by the UI
-                if getattr(server_content, "turn_complete", False):
-                    pass # Could send a JSON message here indicating turn complete
+                    # Handle transcriptions
+                    if getattr(server_content, "input_transcription", None):
+                        transcript = server_content.input_transcription.text
+                        await websocket.send_json({"type": "input_transcript", "text": transcript})
+                    
+                    if getattr(server_content, "output_transcription", None):
+                        transcript = server_content.output_transcription.text
+                        await websocket.send_json({"type": "output_transcript", "text": transcript})
+
+                    model_turn = getattr(server_content, "model_turn", None)
+                    if model_turn is not None:
+                        for part in getattr(model_turn, "parts", []):
+                            # WebSockets expect binary data for audio
+                            if getattr(part, "inline_data", None) and part.inline_data.data:
+                                # Send raw PCM bytes directly to the browser
+                                await websocket.send_bytes(part.inline_data.data)
+
+                    # Send turnaround signals if needed by the UI
+                    if getattr(server_content, "turn_complete", False):
+                        print("Gemini signal: Turn Complete (Response finished)")
+            
+            # If the iterator finishes, we stay in the while loop to Wait for next session events
+            # unless the session is closed by elsewhere.
+            await asyncio.sleep(0.01) # Avoid tight loop if iterator exhausts immediately
                     
     except asyncio.CancelledError:
-        pass
+        print("Task cancelled: receive_from_gemini")
     except Exception as e:
         print(f"Error receiving from Gemini: {e}")
+        traceback.print_exc()
+    finally:
+        print("Task ended: receive_from_gemini")
 
 async def send_to_gemini(websocket: WebSocket, session):
     """Receive audio from the browser and send it to Gemini."""
+    print("Task started: send_to_gemini")
     try:
         while True:
-            # We expect binary data from the WebSocket (Int16 PCM)
-            data = await websocket.receive_bytes()
+            # We expect bytes (PCM) or string (JSON commands/keepalive)
+            try:
+                message = await websocket.receive()
+            except RuntimeError:
+                # Occurs if the connection is already closing/closed
+                break
             
-            await session.send_realtime_input(
-                audio=types.Blob(
-                    data=data,
-                    mime_type="audio/pcm;rate=16000"
+            if "bytes" in message:
+                data = message["bytes"]
+                await session.send_realtime_input(
+                    audio=types.Blob(
+                        data=data,
+                        mime_type="audio/pcm;rate=16000"
+                    )
                 )
-            )
+            elif "text" in message:
+                print(f"Received text from browser: {message['text']}")
+                # Handle possible JSON commands here
+            else:
+                print(f"Received unknown message type: {message}")
+                
     except WebSocketDisconnect:
-        print("Browser disconnected.")
+        print("Browser disconnected (WebSocketDisconnect).")
     except asyncio.CancelledError:
-        pass
+        print("Task cancelled: send_to_gemini")
     except Exception as e:
         print(f"Error sending to Gemini: {e}")
+        traceback.print_exc()
+    finally:
+        print("Task ended: send_to_gemini")
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    print("Browser WebSocket connection accepted.")
     
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -83,33 +128,39 @@ async def websocket_endpoint(websocket: WebSocket):
         "response_modalities": ["AUDIO"],
         "system_instruction": {
             "parts": [{"text": 
-                "Du bist ein hilfreicher und freundlicher Kundenservice-Mitarbeiter. "
+                "Du bist Amin's Assistent, ein hilfreicher und freundlicher Kundenservice-Mitarbeiter. "
                 "Du sprichst ausschließlich Deutsch. "
                 "Deine Antworten sollten natürlich, prägnant und gesprächsorientiert "
                 "sein, da diese über ein Telefon oder WebRTC geführt werden."
             }]
+        },
+        "input_audio_transcription": {},
+        "output_audio_transcription": {},
+        "realtime_input_config": {
+            "automatic_activity_detection": {
+                "disabled": False,
+                "silence_duration_ms": 1000,
+            }
         }
     }
     
     try:
         async with client.aio.live.connect(model=model, config=config) as session:
-            print("Connected to Gemini Live API via WebSocket.")
+            print("Connected to Gemini Live API session.")
             
             # Run both streaming directions concurrently
             receive_task = asyncio.create_task(receive_from_gemini(websocket, session))
             send_task = asyncio.create_task(send_to_gemini(websocket, session))
             
-            done, pending = await asyncio.wait(
-                [receive_task, send_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            for task in pending:
-                task.cancel()
+            # Use gather to wait for both tasks to complete.
+            # Usually they will run until the browser disconnects or an error occurs.
+            await asyncio.gather(receive_task, send_task)
                 
     except Exception as e:
-        print(f"Connection error: {e}")
+        print(f"Session connection error: {e}")
+        traceback.print_exc()
     finally:
+        print("Closing browser WebSocket.")
         try:
             await websocket.close()
         except:
